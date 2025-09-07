@@ -1,4 +1,4 @@
-# api/index.py
+"""API server for RAG on portfolio/resume using FastAPI, OpenAI, and MongoDB."""
 import os
 import math
 from typing import List, Optional
@@ -8,10 +8,11 @@ from pydantic import BaseModel
 from pymongo import MongoClient
 from openai import OpenAI
 
+
 # --- Environment / config ---
 MONGODB_URI = os.getenv("MONGODB_URI")
-MONGODB_DB = os.getenv("MONGODB_DB", "resume_rag")
-MONGODB_COLL = os.getenv("MONGODB_COLL", "chunks")
+MONGODB_DB = os.getenv("MONGODB_DB", "portfolio")
+MONGODB_COLL = os.getenv("MONGODB_COLL", "portfolio_chunks")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
@@ -90,11 +91,18 @@ def normalize_result(r):
     }
 
 
+@app.get('/')
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "ok"}
+
 # --- Endpoint: health ---
 @app.get("/api/health")
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
 
 
 # --- Endpoint: query RAG ---
