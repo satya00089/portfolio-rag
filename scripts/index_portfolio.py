@@ -15,8 +15,8 @@ from openai import OpenAI
 load_dotenv()
 
 MONGO_URI = os.environ["MONGODB_URI"]
-MONGO_DB = os.environ.get("MONGODB_DB", "resume_rag")
-MONGO_COLL = os.environ.get("MONGODB_COLL", "chunks")
+MONGO_DB = os.environ.get("MONGODB_DB", "portfolio")
+MONGO_COLL = os.environ.get("MONGODB_COLL", "portfolio_chunks")
 OPENAI_KEY = os.environ["OPENAI_API_KEY"]
 EMBED_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "8"))
@@ -63,6 +63,22 @@ def collect_text_parts(data: dict) -> List[dict]:
     p = data.get("personal", {})
     if p.get("summary"):
         parts.append({"text": p["summary"], "meta": {"section": "personal.summary"}})
+    if p.get("contact"):
+        contact_lines = []
+        for k, v in p["contact"].items():
+            if k == "socials":
+                for social in v:
+                    contact_lines.append(
+                        f"{social.get('label', 'social')}: {social.get('url','')}"
+                    )
+            else:
+                contact_lines.append(f"{k}: {v}")
+        parts.append(
+            {
+                "text": "Contact:\n" + "\n".join(contact_lines),
+                "meta": {"section": "personal.contact"},
+            }
+        )
     if data.get("summary"):
         parts.append({"text": data["summary"], "meta": {"section": "summary"}})
     if data.get("highlights"):
@@ -72,8 +88,26 @@ def collect_text_parts(data: dict) -> List[dict]:
                 "meta": {"section": "highlights"},
             }
         )
+    if data.get("projects", None):
+        projects = [
+            f"Project: {p.get('title','')}\n{p.get('description','')}\nTags: {', '.join(p.get('tags', []))}\n"
+            for p in data.get("projects", [])
+        ]
+        projects_text = "\n ".join(projects)
+        txt = f"Projects:\n {projects_text}"
+        parts.append(
+            {
+                "text": txt,
+                "meta": {"section": "projects"},
+            }
+        )
+
     for proj in data.get("projects", []):
-        txt = f"{proj.get('title','')}\n{proj.get('description','')}\nTags: {', '.join(proj.get('tags', []))}"
+        links = [
+            f"label: {l.get('label')}, url: {l.get('url')}"
+            for l in proj.get("links", [])
+        ]
+        txt = f"Project: {proj.get('title','')}\n{proj.get('description','')}\nTags: {', '.join(proj.get('tags', []))}\nLinks: {links}"
         parts.append(
             {
                 "text": txt,
@@ -82,6 +116,7 @@ def collect_text_parts(data: dict) -> List[dict]:
                     "id": proj.get("id"),
                     "title": proj.get("title"),
                     "url": proj.get("href"),
+                    "links": proj.get("links", []),
                 },
             }
         )

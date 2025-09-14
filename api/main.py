@@ -131,7 +131,7 @@ async def query_rag(req: QueryRequest):
     try:
         # prefer $vectorSearch/$search with knnBeta — choose syntax available in your Atlas
         pipeline = [
-            {"$search": {"knnBeta": {"vector": emb, "path": "embedding", "k": k}}},
+            {"$search": {"index": "index", "knnBeta": {"vector": emb, "path": "embedding", "k": k}}},
             {
                 "$project": {
                     "_id": 0,
@@ -173,8 +173,15 @@ async def query_rag(req: QueryRequest):
         ]
     )
     system_prompt = (
-        "You are a helpful assistant answering questions about a person's resume/portfolio. "
-        "Use the provided CONTEXT to answer concisely and precisely. If the answer is not present in the context, say 'I don't know' or give a brief honest answer."
+        "You are a concise, factual assistant that answers questions about Satya's resume and portfolio. "
+        "Use only the provided CONTEXT to form your answers; do not rely on external knowledge except for "
+        "very brief clarifications. If the information is not present in the CONTEXT, respond with "
+        "\"I don't know\" or a brief honest statement (e.g. \"I don't have that information in the provided context\"). "
+        "Be concise and clear: prefer short paragraphs or bullet points and avoid speculation. "
+        "Do not include raw source text longer than 200 characters; summarize and cite the source instead. "
+        "If the user requests actionable changes (for example, resume edits), give step-by-step, prioritized suggestions. "
+        "If the user's question is ambiguous, ask one clear clarifying question. "
+        "Respect privacy: do not invent contact details, personal identifiers, or confidential data."
     )
 
     messages = [
