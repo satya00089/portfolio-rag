@@ -52,8 +52,11 @@ in chat. Boto3 1.39.0 or later reads a Bedrock API key from
 | `CORS_ALLOW_ORIGINS` | Comma-separated browser origins, e.g. `https://satya00089.github.io`. |
 | `TOP_K` | Number of context chunks to return; defaults to `4` and is capped at `10`. |
 
-A short-term Bedrock API key expires; use a suitable long-term key or a
-refreshable AWS credential method for a long-running deployment. Ensure the
+Bedrock API keys also expire: short-term keys last no longer than 12 hours,
+and long-term keys expire after the period chosen when they are created. For a
+long-running deployment, use a suitable long-term key and rotate it before
+expiry, or use refreshable AWS credentials. Key expiry is separate from AWS
+billing credits. Ensure the
 key's IAM permissions and model access allow invoking both Titan Text
 Embeddings V2 and the GPT-6 Luna global inference profile in the configured
 Region. AWS may require permissions for the profile, its destination models,
