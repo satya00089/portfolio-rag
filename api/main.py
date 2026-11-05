@@ -1,32 +1,35 @@
-"""API server for RAG on portfolio/resume using FastAPI, OpenAI, and MongoDB."""
+"""API server for RAG on portfolio/resume using Bedrock and S3 Vectors."""
 import os
-import math
+import json
+import logging
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from pymongo import MongoClient
+import boto3
 from openai import OpenAI
+from api import titan
 
 
 # --- Environment / config ---
-MONGODB_URI = os.getenv("MONGODB_URI")
-MONGODB_DB = os.getenv("MONGODB_DB", "portfolio")
-MONGODB_COLL = os.getenv("MONGODB_COLL", "portfolio_chunks")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+S3_VECTOR_BUCKET = os.getenv("S3_VECTOR_BUCKET")
+S3_VECTOR_INDEX = os.getenv("S3_VECTOR_INDEX", "portfolio-titan-v2")
+BEDROCK_REGION = os.getenv("BEDROCK_REGION", "ap-south-1")
+BEDROCK_API_KEY = os.getenv("AWS_BEARER_TOKEN_BEDROCK")
+CHAT_MODEL = os.getenv("BEDROCK_CHAT_MODEL_ID", "global.openai.gpt-6-luna")
 TOP_K = int(os.getenv("TOP_K", "4"))
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY must be set in environment")
-if not MONGODB_URI:
-    raise RuntimeError("MONGODB_URI must be set in environment")
+if not S3_VECTOR_BUCKET:
+    raise RuntimeError("S3_VECTOR_BUCKET must be set in environment")
+if not BEDROCK_API_KEY:
+    raise RuntimeError("AWS_BEARER_TOKEN_BEDROCK must be set in environment")
 
 # --- Clients ---
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
-mongo_client = MongoClient(MONGODB_URI)
-coll = mongo_client[MONGODB_DB][MONGODB_COLL]
+bedrock_client = OpenAI(
+    api_key=BEDROCK_API_KEY,
+    base_url=f"https://bedrock-runtime.{BEDROCK_REGION}.amazonaws.com/openai/v1",
+)
+vector_client = boto3.client("s3vectors", region_name=BEDROCK_REGION)
 
 # --- FastAPI app ---
 app = FastAPI(title="RAG API for Portfolio")
@@ -69,18 +72,6 @@ class QueryResponse(BaseModel):
 
 
 # --- Helpers ---
-def cosine_sim(a: List[float], b: List[float]) -> float:
-    """Compute cosine similarity between two vectors."""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
-
-
 def normalize_result(r):
     """Normalize a DB result to Source model."""
     return {
@@ -110,57 +101,40 @@ async def health():
 async def query_rag(req: QueryRequest):
     """Handle a query with RAG: embed, search, chat completion."""
     q = req.q.strip()
-    k = req.k or TOP_K
+    k = TOP_K if req.k is None else req.k
     if not q:
         raise HTTPException(status_code=400, detail="q is required")
+    if not 1 <= k <= 100:
+        raise HTTPException(status_code=400, detail="k must be between 1 and 100")
 
     # 1) embed the query
     try:
-        emb_resp = openai_client.embeddings.create(model=EMBED_MODEL, input=q)
-        # support new client response shape
-        emb = (
-            emb_resp.data[0].embedding
-            if hasattr(emb_resp, "data")
-            else emb_resp["data"][0]["embedding"]
-        )
+        emb = titan.embed(q)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Embedding error: {str(e)}")
+        logging.exception("Bedrock embedding failed")
+        raise HTTPException(status_code=502, detail="Embedding service unavailable") from e
 
-    # 2) try Atlas vector search ($search / knnBeta). fallback to scanning & cosine.
-    results = []
+    # 2) Search the Titan vectors. S3 returns cosine distance, not similarity.
     try:
-        # prefer $vectorSearch/$search with knnBeta — choose syntax available in your Atlas
-        pipeline = [
-            {"$search": {"index": "index", "knnBeta": {"vector": emb, "path": "embedding", "k": k}}},
-            {
-                "$project": {
-                    "_id": 0,
-                    "id": 1,
-                    "text": 1,
-                    "meta": 1,
-                    "score": {"$meta": "searchScore"},
-                }
-            },
-            {"$limit": k},
-        ]
-        cursor = coll.aggregate(pipeline)
-        results = list(cursor)
-    except Exception:
-        # fallback: compute cosine similarity across documents (fine for small dataset)
-        docs = list(coll.find({}, {"id": 1, "text": 1, "meta": 1, "embedding": 1}))
-        scored = []
-        for d in docs:
-            score = cosine_sim(emb, d.get("embedding") or [])
-            scored.append(
-                {
-                    "id": d.get("id"),
-                    "text": d.get("text"),
-                    "meta": d.get("meta"),
-                    "score": score,
-                }
-            )
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        results = scored[:k]
+        response = vector_client.query_vectors(
+            vectorBucketName=S3_VECTOR_BUCKET, indexName=S3_VECTOR_INDEX,
+            queryVector={"float32": emb}, topK=k, returnMetadata=True, returnDistance=True,
+        )
+        if response.get("distanceMetric") != "cosine":
+            raise ValueError("S3 vector index must use cosine distance")
+        results = []
+        for vector in response.get("vectors", []):
+            metadata = vector.get("metadata") or {}
+            results.append({
+                "id": vector["key"], "text": metadata.get("text", ""),
+                "meta": json.loads(metadata.get("meta_json", "{}")),
+                "score": 1.0 - vector["distance"],
+            })
+    except Exception as e:
+        logging.exception("S3 vector search failed")
+        raise HTTPException(status_code=502, detail="Vector search unavailable") from e
+    if not results:
+        raise HTTPException(status_code=503, detail="No portfolio vectors found; check S3 index and migration")
 
     # normalize results
     sources = [normalize_result(r) for r in results]
@@ -191,8 +165,9 @@ async def query_rag(req: QueryRequest):
     ]
 
     try:
-        chat_resp = openai_client.chat.completions.create(
-            model=CHAT_MODEL, messages=messages, max_tokens=600, temperature=0.0
+        chat_resp = bedrock_client.chat.completions.create(
+            model=CHAT_MODEL, messages=messages, max_completion_tokens=600,
+            reasoning_effort="none", temperature=0.0,
         )
         # support different response shapes
         if hasattr(chat_resp, "choices") and chat_resp.choices:

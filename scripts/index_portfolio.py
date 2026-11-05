@@ -1,38 +1,27 @@
 # index_portfolio_fixed.py
-# pip install pymongo openai python-dotenv
+# pip install boto3 python-dotenv
 import os
 import json
 import time
 import math
 import hashlib
+import sys
+from pathlib import Path
 from typing import List
-from pymongo import MongoClient, UpdateOne
+import boto3
 from dotenv import load_dotenv
 
-# modern openai client
-from openai import OpenAI
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from api import titan
 
 load_dotenv()
 
-MONGO_URI = os.environ["MONGODB_URI"]
-MONGO_DB = os.environ.get("MONGODB_DB", "portfolio")
-MONGO_COLL = os.environ.get("MONGODB_COLL", "portfolio_chunks")
-OPENAI_KEY = os.environ["OPENAI_API_KEY"]
-EMBED_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+VECTOR_BUCKET = os.environ["S3_VECTOR_BUCKET"]
+VECTOR_INDEX = os.getenv("S3_VECTOR_INDEX", "portfolio-titan-v2")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "8"))
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "800"))  # characters
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "200"))
-
-if not OPENAI_KEY:
-    raise SystemExit("OPENAI_API_KEY required in environment")
-
-# --- MongoDB client (avoid name 'client' collision) ---
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB]
-coll = db[MONGO_COLL]
-
-# --- OpenAI client (distinct name) ---
-openai_client = OpenAI(api_key=OPENAI_KEY)
+vector_client = boto3.client("s3vectors", region_name=os.getenv("BEDROCK_REGION", "ap-south-1"))
 
 # load portfolio JSON (adjust path)
 with open("portfolio.json", "r", encoding="utf-8") as f:
@@ -188,50 +177,16 @@ def text_to_id(text: str) -> str:
 
 # Robust embed_batch supporting new/old SDK shapes
 def embed_batch(inputs: List[str]) -> List[List[float]]:
-    """
-    Returns list of embedding vectors aligned with inputs.
-    Uses openai_client.embeddings.create(...)
-    """
-    # call embeddings
-    resp = openai_client.embeddings.create(model=EMBED_MODEL, input=inputs)
-
-    # resp may be an object with .data or a dict; handle both
-    data = None
-    if hasattr(resp, "data"):
-        data = resp.data
-    elif isinstance(resp, dict) and "data" in resp:
-        data = resp["data"]
-    else:
-        raise RuntimeError(f"Unexpected embeddings response shape: {type(resp)}")
-
-    embeddings = []
-    for item in data:
-        # item may be object with .embedding or dict with ['embedding']
-        if hasattr(item, "embedding"):
-            embeddings.append(item.embedding)
-        elif isinstance(item, dict) and "embedding" in item:
-            embeddings.append(item["embedding"])
-        else:
-            raise RuntimeError(f"Unexpected embedding item shape: {type(item)}")
-    return embeddings
+    return [titan.embed(text) for text in inputs]
 
 
 def upsert_chunks(chunks):
-    ops = []
-    for c in chunks:
-        doc = {
-            "id": c["id"],
-            "text": c["text"],
-            "meta": c.get("meta", {}),
-            "embedding": c.get("embedding"),
-            "indexedAt": c.get("indexedAt")
-            or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        ops.append(UpdateOne({"id": doc["id"]}, {"$set": doc}, upsert=True))
-    if ops:
-        res = coll.bulk_write(ops)
-        return res.bulk_api_result
-    return None
+    vectors = [{
+        "key": c["id"], "data": {"float32": c["embedding"]},
+        "metadata": {"text": c["text"], "meta_json": json.dumps(c.get("meta", {}))},
+    } for c in chunks]
+    if vectors:
+        vector_client.put_vectors(vectorBucketName=VECTOR_BUCKET, indexName=VECTOR_INDEX, vectors=vectors)
 
 
 # ---------- main ----------
