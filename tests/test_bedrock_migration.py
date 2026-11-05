@@ -56,6 +56,19 @@ class MigrationCollection:
 
 
 class BedrockTests(unittest.TestCase):
+    def test_inspection_reports_legacy_dimensions_without_writing(self):
+        source = MigrationCollection("portfolio_chunks", [
+            {"_id": "a", "text": "A fact", "embedding": [0.1] * 1536},
+            {"_id": "b", "text": "Another fact", "embedding": [0.2] * 1536},
+        ])
+        before = {key: dict(value) for key, value in source.docs.items()}
+        report = migrate_bedrock.inspect_source(source)
+        self.assertEqual(report["total"], 2)
+        self.assertEqual(report["dimensions"], {1536: 2})
+        self.assertEqual(report["models"], {"not recorded": 2})
+        self.assertEqual(report["missing_text"], 0)
+        self.assertEqual(source.docs, before)
+
     def test_indexing_chunks_overlap_and_reject_invalid_settings(self):
         chunks = index_portfolio.chunk_text("abcdefghijklmnopqrstuvwxyz", chunk_size=10, overlap=3)
         self.assertEqual(chunks, ["abcdefghij", "hijklmnopq", "opqrstuvwx", "vwxyz"])

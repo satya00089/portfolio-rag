@@ -71,6 +71,13 @@ migration reads existing chunk text and metadata, calls Bedrock once per chunk,
 and writes new vectors to a separate collection. It never writes to the source.
 It does incur Bedrock usage charges.
 
+The original indexer defaulted to OpenAI `text-embedding-3-small` and did not
+specify dimensions, so its default vectors would have 1,536 dimensions. The
+model could be overridden with `EMBEDDING_MODEL` when indexing, however, and
+the original indexer did not save the model name in its documents. The actual
+historical model therefore cannot be confirmed from the code alone. A 1,536
+length is a useful clue, not proof of which model was used.
+
 1. In Vercel, note the existing `MONGODB_DB` and `MONGODB_COLL` values. The
    source may have a different name from the example below. Do not change the
    production collection or deploy the new API yet.
@@ -82,10 +89,24 @@ It does incur Bedrock usage charges.
    pip install -r requirements.txt
    ```
 
-3. Set `MONGODB_URI`, `MONGODB_DB`, `AWS_BEARER_TOKEN_BEDROCK`, and, if
-   needed, the Bedrock model, Region and dimension variables locally. Use the
-   **same** embedding model and dimensions that the API will use.
-4. Pick a new empty collection and run the migration, replacing the source name
+3. Set `MONGODB_URI` and `MONGODB_DB` locally for inspection. Before the
+   migration, also set `AWS_BEARER_TOKEN_BEDROCK` and, if needed, the Bedrock
+   model, Region and dimension variables. Use the **same** embedding model and
+   dimensions that the API will use.
+4. First inspect the existing collection without changing it or making any
+   Bedrock requests. Replace the source name with your actual current
+   collection:
+
+   ```sh
+   python -m scripts.migrate_bedrock --source portfolio_chunks --inspect-only
+   ```
+
+   This prints counts of vector lengths and any recorded model labels, plus the
+   number of records missing text. It does not print the contents of the records
+   or connection string. Check the original indexing environment's
+   `EMBEDDING_MODEL` too if you still have it. A current Vercel value alone
+   does not prove what was used during past indexing.
+5. Pick a new empty collection and run the migration, replacing the source name
    with the current Vercel `MONGODB_COLL` value:
 
    ```sh
@@ -96,7 +117,7 @@ It does incur Bedrock usage charges.
    nonempty target. If it stops partway through, rerun with `--resume` and the
    same source, target, model and dimensions. It checks for incompatible data
    before resuming. Confirm the reported count matches the source collection.
-5. Set the new Vercel environment variables, including `MONGODB_COLL` set to
+6. Set the new Vercel environment variables, including `MONGODB_COLL` set to
    the new target. Deploy the new code and send a test question. Keep the old
    collection intact until you have verified the new deployment.
 

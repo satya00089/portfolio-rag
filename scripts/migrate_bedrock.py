@@ -1,5 +1,6 @@
 """Copy existing portfolio chunks into a separate Titan-embedded collection."""
 import argparse
+from collections import Counter
 import os
 from pathlib import Path
 import sys
@@ -11,6 +12,27 @@ from pymongo import MongoClient
 load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api.bedrock import EMBED_DIMENSIONS, EMBED_MODEL, create_runtime, embed_text
+
+
+def inspect_source(source):
+    """Report embedding lengths and stored model labels without modifying data."""
+    dimensions = Counter()
+    models = Counter()
+    total = 0
+    missing_text = 0
+    for doc in source.find({}, {"text": 1, "embedding": 1, "embedding_model": 1}):
+        total += 1
+        vector = doc.get("embedding")
+        dimensions[len(vector) if isinstance(vector, list) else "missing or invalid"] += 1
+        models[str(doc.get("embedding_model") or "not recorded")] += 1
+        if not isinstance(doc.get("text"), str) or not doc["text"].strip():
+            missing_text += 1
+    return {
+        "total": total,
+        "dimensions": dict(dimensions),
+        "models": dict(models),
+        "missing_text": missing_text,
+    }
 
 
 def migrate(source, target, source_name, runtime, resume=False, delay=0.5):
@@ -69,9 +91,10 @@ def main():
     parser.add_argument("--source", default="portfolio_chunks", help="Existing OpenAI-embedded collection")
     parser.add_argument("--target", default="portfolio_chunks_titan_v2", help="New, separate collection")
     parser.add_argument("--resume", action="store_true", help="Resume a previous migration to the same target")
+    parser.add_argument("--inspect-only", action="store_true", help="Report source embedding dimensions without writing data or calling Bedrock")
     parser.add_argument("--delay", type=float, default=0.5, help="Seconds between embedding requests")
     args = parser.parse_args()
-    if args.source == args.target:
+    if not args.inspect_only and args.source == args.target:
         parser.error("--source and --target must be different")
     if args.delay < 0:
         parser.error("--delay cannot be negative")
@@ -79,6 +102,14 @@ def main():
     if not uri:
         parser.error("MONGODB_URI is required")
     db = MongoClient(uri, serverSelectionTimeoutMS=5000)[os.getenv("MONGODB_DB", "portfolio")]
+    if args.inspect_only:
+        report = inspect_source(db[args.source])
+        print(f"Documents: {report['total']}")
+        print(f"Embedding dimensions (count): {report['dimensions']}")
+        print(f"Recorded embedding models (count): {report['models']}")
+        print(f"Documents with missing or empty text: {report['missing_text']}")
+        print("Inspection only: no documents were changed and no Bedrock requests were made.")
+        return
     migrate(db[args.source], db[args.target], args.source, create_runtime(), args.resume, args.delay)
 
 
