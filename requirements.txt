@@ -1,6 +1,6 @@
 fastapi
 uvicorn
 pymongo
-openai
+boto3>=1.39.0,<2
 pydantic
 python-dotenv

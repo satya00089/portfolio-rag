@@ -1,47 +1,32 @@
-# index_portfolio_fixed.py
-# pip install pymongo openai python-dotenv
+"""Index the checked-in portfolio data with Bedrock Titan embeddings."""
 import os
 import json
 import time
 import math
 import hashlib
+import sys
+from pathlib import Path
 from typing import List
 from pymongo import MongoClient, UpdateOne
 from dotenv import load_dotenv
 
-# modern openai client
-from openai import OpenAI
-
 load_dotenv()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from api.bedrock import EMBED_DIMENSIONS, EMBED_MODEL, create_runtime, embed_text
 
-MONGO_URI = os.environ["MONGODB_URI"]
-MONGO_DB = os.environ.get("MONGODB_DB", "portfolio")
-MONGO_COLL = os.environ.get("MONGODB_COLL", "portfolio_chunks")
-OPENAI_KEY = os.environ["OPENAI_API_KEY"]
-EMBED_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "8"))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "800"))  # characters
 CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "200"))
-
-if not OPENAI_KEY:
-    raise SystemExit("OPENAI_API_KEY required in environment")
-
-# --- MongoDB client (avoid name 'client' collision) ---
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB]
-coll = db[MONGO_COLL]
-
-# --- OpenAI client (distinct name) ---
-openai_client = OpenAI(api_key=OPENAI_KEY)
-
-# load portfolio JSON (adjust path)
-with open("portfolio.json", "r", encoding="utf-8") as f:
-    portfolio = json.load(f)
+INDEX_DELAY = float(os.environ.get("BEDROCK_INDEX_DELAY", "0.5"))
 
 
 # ---------- helpers ----------
 def chunk_text(s: str, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> List[str]:
+    if chunk_size <= 0 or not 0 <= overlap < chunk_size:
+        raise ValueError("CHUNK_OVERLAP must be non-negative and smaller than CHUNK_SIZE")
     s = s.strip()
+    if not s:
+        return []
     if len(s) <= chunk_size:
         return [s]
     parts = []
@@ -54,7 +39,9 @@ def chunk_text(s: str, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> List[str
             if last_space > i + (chunk_size // 2):
                 end = last_space
         parts.append(s[i:end].strip())
-        i = max(end - overlap, end)
+        if end >= n:
+            break
+        i = max(i + 1, end - overlap)
     return parts
 
 
@@ -186,37 +173,17 @@ def text_to_id(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-# Robust embed_batch supporting new/old SDK shapes
-def embed_batch(inputs: List[str]) -> List[List[float]]:
-    """
-    Returns list of embedding vectors aligned with inputs.
-    Uses openai_client.embeddings.create(...)
-    """
-    # call embeddings
-    resp = openai_client.embeddings.create(model=EMBED_MODEL, input=inputs)
-
-    # resp may be an object with .data or a dict; handle both
-    data = None
-    if hasattr(resp, "data"):
-        data = resp.data
-    elif isinstance(resp, dict) and "data" in resp:
-        data = resp["data"]
-    else:
-        raise RuntimeError(f"Unexpected embeddings response shape: {type(resp)}")
-
+def embed_batch(client, inputs: List[str]) -> List[List[float]]:
+    """Titan accepts one input per request; keep the vectors in input order."""
     embeddings = []
-    for item in data:
-        # item may be object with .embedding or dict with ['embedding']
-        if hasattr(item, "embedding"):
-            embeddings.append(item.embedding)
-        elif isinstance(item, dict) and "embedding" in item:
-            embeddings.append(item["embedding"])
-        else:
-            raise RuntimeError(f"Unexpected embedding item shape: {type(item)}")
+    for text in inputs:
+        embeddings.append(embed_text(client, text))
+        if INDEX_DELAY:
+            time.sleep(INDEX_DELAY)
     return embeddings
 
 
-def upsert_chunks(chunks):
+def upsert_chunks(collection, chunks):
     ops = []
     for c in chunks:
         doc = {
@@ -224,18 +191,39 @@ def upsert_chunks(chunks):
             "text": c["text"],
             "meta": c.get("meta", {}),
             "embedding": c.get("embedding"),
+            "embedding_model": EMBED_MODEL,
+            "embedding_dimensions": EMBED_DIMENSIONS,
             "indexedAt": c.get("indexedAt")
             or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         ops.append(UpdateOne({"id": doc["id"]}, {"$set": doc}, upsert=True))
     if ops:
-        res = coll.bulk_write(ops)
+        res = collection.bulk_write(ops)
         return res.bulk_api_result
     return None
 
 
 # ---------- main ----------
 def main():
+    mongo_uri = os.getenv("MONGODB_URI")
+    if not mongo_uri:
+        raise SystemExit("MONGODB_URI is required")
+    source_name = os.getenv("BEDROCK_SOURCE_COLLECTION", "portfolio_chunks")
+    target_name = os.getenv("BEDROCK_TARGET_COLLECTION", "portfolio_chunks_titan_v2")
+    if target_name == source_name:
+        raise SystemExit("Choose a different Bedrock target collection from your existing source")
+    if BATCH_SIZE < 1 or INDEX_DELAY < 0:
+        raise SystemExit("BATCH_SIZE must be positive and BEDROCK_INDEX_DELAY must be non-negative")
+    coll = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)[os.getenv("MONGODB_DB", "portfolio")][target_name]
+    mismatch = {"$or": [
+        {"embedding_model": {"$ne": EMBED_MODEL}},
+        {"embedding_dimensions": {"$ne": EMBED_DIMENSIONS}},
+    ]}
+    if coll.count_documents(mismatch):
+        raise SystemExit("Target contains incompatible embeddings; choose a new collection")
+    bedrock_client = create_runtime()
+    with Path(__file__).with_name("portfolio.json").open("r", encoding="utf-8") as f:
+        portfolio = json.load(f)
     parts = collect_text_parts(portfolio)
     docs = []
     for p in parts:
@@ -253,11 +241,10 @@ def main():
         print(
             f"Embedding batch {i//BATCH_SIZE + 1}/{math.ceil(len(docs)/BATCH_SIZE)} size {len(inputs)}"
         )
-        embeddings = embed_batch(inputs)
+        embeddings = embed_batch(bedrock_client, inputs)
         for j, emb in enumerate(embeddings):
             batch[j]["embedding"] = emb
-        upsert_chunks(batch)
-        time.sleep(0.5)
+        upsert_chunks(coll, batch)
 
     print("Indexing complete")
 
