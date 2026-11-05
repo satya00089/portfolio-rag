@@ -1,156 +1,86 @@
-# Portfolio assistant on Amazon Bedrock
+# FastAPI Vercel Deployment
 
-This FastAPI service answers portfolio questions for the existing CLI. It uses
-Amazon Titan Text Embeddings V2 to embed each question, compares that vector
-with portfolio chunks in MongoDB, and asks GPT-6 Luna on Amazon Bedrock to
-answer from the selected chunks. The existing `POST /api/query` request and
-`{ "answer": ..., "sources": [...] }` response stay the same.
+This project demonstrates how to deploy a FastAPI application on Vercel.
 
-## Models, Region, and cost
+## Requirements
 
-The defaults are designed for a small, text-only portfolio:
+- Python installed on your machine
+- Account on [Vercel](https://vercel.com/)
 
-| Purpose | Default |
-| --- | --- |
-| Bedrock source Region | `ap-south-1` (Mumbai) |
-| Answer model | `global.openai.gpt-6-luna` |
-| Reasoning effort | `low` |
-| Embeddings | `amazon.titan-embed-text-v2:0`, 1,024 dimensions |
-| MongoDB collection | `portfolio_chunks_titan_v2` |
+## Project Setup
 
-GPT-6 Luna's global inference profile can route requests outside India. The
-source Region is Mumbai; it is **not** a data-residency guarantee. Model
-availability, quotas and pricing depend on the AWS account and Region. Bedrock
-on-demand inference is billed through AWS for usage; existing AWS promotional
-credits, if any, may have their own expiration rules. Check the current
-[Bedrock model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-luna.html)
-and [pricing](https://aws.amazon.com/bedrock/pricing/).
+1. **Project Structure**:
+    - Ensure your project has the following structure:
+    ```
+    ├── api
+    │   └── main.py
+    ├── requirements.txt
+    └── vercel.json
+    ```
 
-The default uses a direct cosine-similarity scan of the configured MongoDB
-collection. This keeps a small portfolio simple and does not require an Atlas
-vector index. If the collection becomes large, switch to a properly indexed
-vector search rather than scanning every chunk.
+2. **[`main.py`](./api/main.py "Go to definition") File**:
+    - Your [`api/main.py`](./api/main.py "Go to definition") file should look like this:
+    ```python
+    from fastapi import FastAPI
 
-## Configuration
+    app = FastAPI()
 
-Configure these as environment variables in Vercel for the API, and locally
-when running the migration. Do not put secrets in source control or send them
-in chat. Boto3 1.39.0 or later reads a Bedrock API key from
-`AWS_BEARER_TOKEN_BEDROCK`; alternatively it can use normal AWS credentials.
 
-| Variable | Value |
-| --- | --- |
-| `AWS_BEARER_TOKEN_BEDROCK` | Your Bedrock API key, stored as a secret. |
-| `BEDROCK_REGION` | `ap-south-1` by default. |
-| `BEDROCK_CHAT_MODEL_ID` | `global.openai.gpt-6-luna` by default. |
-| `BEDROCK_REASONING_EFFORT` | `low` by default, for GPT-6 models. |
-| `BEDROCK_EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` by default. |
-| `BEDROCK_EMBEDDING_DIMENSIONS` | `1024` by default; Titan also supports `512` and `256`. |
-| `MONGODB_URI` | Your existing MongoDB connection string, stored as a secret. |
-| `MONGODB_DB` | Existing database; defaults to `portfolio`. |
-| `MONGODB_COLL` | API collection; set to the new target, e.g. `portfolio_chunks_titan_v2`. |
-| `CORS_ALLOW_ORIGINS` | Comma-separated browser origins, e.g. `https://satya00089.github.io`. |
-| `TOP_K` | Number of context chunks to return; defaults to `4` and is capped at `10`. |
+    @app.get('/')
+    async def health_check():
+      return "The health check is successful v0.0.1!"
+    ```
 
-Bedrock API keys also expire: short-term keys last no longer than 12 hours,
-and long-term keys expire after the period chosen when they are created. For a
-long-running deployment, use a suitable long-term key and rotate it before
-expiry, or use refreshable AWS credentials. Key expiry is separate from AWS
-billing credits. Ensure the
-key's IAM permissions and model access allow invoking both Titan Text
-Embeddings V2 and the GPT-6 Luna global inference profile in the configured
-Region. AWS may require permissions for the profile, its destination models,
-and the default Bedrock project. See [AWS API key setup](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html)
-and the [GPT-6 Luna model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-luna.html).
+3. **[`requirements.txt`](./requirements.txt "Go to definition") File**:
+    - Ensure you have a [`requirements.txt`](./requirements.txt "Go to definition") file with the necessary dependencies:
+    ```
+    fastapi
+    uvicorn
+    ```
 
-## Migrate existing portfolio data safely
+4. **[`vercel.json`](./vercel.json "Go to definition") File**:
+    - Configure the [`vercel.json`](./vercel.json "Go to definition") file to tell Vercel how to deploy your application:
+    ```json
+    {
+        "builds": [
+            {
+                "src": "api/main.py",
+                "use": "@vercel/python"
+            }
+        ],
+        "routes": [
+            {
+                "src": "/(.*)",
+                "dest": "api/main.py"
+            }
+        ]
+    }
+    ```
 
-OpenAI and Titan vectors are different, even if configured with the same
-number of dimensions. Do **not** compare or overwrite the old embeddings. The
-migration reads existing chunk text and metadata, calls Bedrock once per chunk,
-and writes new vectors to a separate collection. It never writes to the source.
-It does incur Bedrock usage charges.
+## Deployment
 
-The original indexer defaulted to OpenAI `text-embedding-3-small` and did not
-specify dimensions, so its default vectors would have 1,536 dimensions. The
-model could be overridden with `EMBEDDING_MODEL` when indexing, however, and
-the original indexer did not save the model name in its documents. The actual
-historical model therefore cannot be confirmed from the code alone. A 1,536
-length is a useful clue, not proof of which model was used.
+You have two options to deploy your application:
 
-1. In Vercel, note the existing `MONGODB_DB` and `MONGODB_COLL` values. The
-   source may have a different name from the example below. Do not change the
-   production collection or deploy the new API yet.
-2. Create a local virtual environment and install the dependencies:
+5. **Option 1: Deploy using Vercel CLI**
+    - Open your terminal, install Vercel CLI, and deploy your project:
+    ```powershell
+    npm i -g vercel
+    vercel .
+    ```
 
-   ```sh
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
+6. **Option 2: Deploy using Vercel web interface**
+    - Go to [Vercel](https://vercel.com/).
+    - Login or create an account if you don't have one.
+    - Click on "New Project".
+    - Select the GitHub repository with your project.
+    - Select the Framework option: "Other".
+    - Click on "Deploy".
 
-3. Set `MONGODB_URI` and `MONGODB_DB` locally for inspection. Before the
-   migration, also set `AWS_BEARER_TOKEN_BEDROCK` and, if needed, the Bedrock
-   model, Region and dimension variables. Use the **same** embedding model and
-   dimensions that the API will use.
-4. First inspect the existing collection without changing it or making any
-   Bedrock requests. Replace the source name with your actual current
-   collection:
+## Possible Issue with Node.js Version
 
-   ```sh
-   python -m scripts.migrate_bedrock --source portfolio_chunks --inspect-only
-   ```
+- Go to the Vercel web interface.
+- Click on "Settings".
+- Search for "Node.js Version" and change it to 18.x.
+- Finally, repeat your deployment option.
 
-   This prints counts of vector lengths and any recorded model labels, plus the
-   number of records missing text. It does not print the contents of the records
-   or connection string. Check the original indexing environment's
-   `EMBEDDING_MODEL` too if you still have it. A current Vercel value alone
-   does not prove what was used during past indexing.
-5. Pick a new empty collection and run the migration, replacing the source name
-   with the current Vercel `MONGODB_COLL` value:
-
-   ```sh
-   python -m scripts.migrate_bedrock --source portfolio_chunks --target portfolio_chunks_titan_v2
-   ```
-
-   The command refuses to use the same source and target, or to overwrite a
-   nonempty target. If it stops partway through, rerun with `--resume` and the
-   same source, target, model and dimensions. It checks for incompatible data
-   before resuming. Confirm the reported count matches the source collection.
-6. Set the new Vercel environment variables, including `MONGODB_COLL` set to
-   the new target. Deploy the new code and send a test question. Keep the old
-   collection intact until you have verified the new deployment.
-
-If the API says portfolio information is not indexed, check the target
-collection, `MONGODB_DB`, embedding model and dimensions. The API only reads
-chunks tagged with the exact configured embedding model and dimension count;
-this prevents old OpenAI vectors from being mixed in. `/api/health` is a
-liveness check, not a check of Bedrock credentials or MongoDB connectivity.
-
-## Update portfolio information later
-
-For a fresh index of the checked-in `scripts/portfolio.json`, run:
-
-```sh
-python -m scripts.index_portfolio
-```
-
-The script defaults to the separate `portfolio_chunks_titan_v2` collection.
-Set `BEDROCK_TARGET_COLLECTION` if the intended destination is different and
-`BEDROCK_SOURCE_COLLECTION` if your old collection is not `portfolio_chunks`;
-the indexer refuses to write to that source or to a collection containing
-incompatible embeddings. `BEDROCK_INDEX_DELAY` controls the delay in seconds
-between Titan requests (default `0.5`). The
-checked-in JSON may be older than production data: review it before indexing.
-The indexer upserts chunks and does not delete stale chunks automatically.
-For a clean rebuild, use a new empty collection, verify it, then update the
-API's `MONGODB_COLL` setting. Changing the embedding model or dimensions also
-requires a fresh reindex.
-
-The API is publicly reachable. CORS controls which browsers may read responses;
-it is **not** authentication or a rate limit. Set AWS budget alerts and use a
-real rate-limiting layer such as a Vercel firewall rule if you need to bound
-cost from unwanted requests. Never put the Bedrock key in the frontend.
-
-`scripts/rag_function.js` is a legacy MongoDB Atlas function using OpenAI's API;
-it is not used by this Vercel deployment and has not been migrated to Bedrock.
+That's it! You have successfully deployed your FastAPI application using Vercel.
